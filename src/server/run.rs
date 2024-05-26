@@ -9,8 +9,9 @@ use {
     types::{tubes::*, Content, Result},
   },
   std::{
-    sync::{mpsc, Arc, Mutex},
-    thread, time,
+    sync::{Arc, Mutex},
+    time,
+    pin::pin,
   },
   tokio::{
     io::{AsyncWriteExt, BufReader},
@@ -19,24 +20,42 @@ use {
 };
 
 pub async fn start_server() -> Result<()> {
+  use futures::stream::StreamExt as _;
+
   let (log_send, log_recv) = make_tube();
-
-  let uptime = time::SystemTime::now();
-
-  thread::spawn(|| logger(log_recv));
+  let mut logger = pin!(logger(log_recv));
 
   let listener = TcpListener::bind("127.0.0.1:7878").await?;
+  let mut futures = futures::stream::FuturesUnordered::new();
 
+  let uptime = time::SystemTime::now();
   loop {
-    let (stream, _) = listener.accept().await?;
-    let log_send = log_send.clone();
+    tokio::select! {
+      // remove the comment on the line below if you want the first future in
+      // this select to take more priority than those below
+      //biased;
 
-    tokio::spawn(async move {
-      if let Err(e) = handle_connection(stream, uptime, log_send).await {
-        eprintln!("{}", e.to_string())
-      }
-    });
-  }
+      // it's impossible for the logger to reach here under normal circumstances
+      // (logger doesn't panic). logger will never terminate because it holds a
+      // receiver whose sender is always alive (it's literally above by a few
+      // lines) and thus will never be closed
+      _ = &mut logger => unreachable!(),
+
+      // when a listener receives a message
+      result = listener.accept() => {
+        let (stream, _) = result?;
+        let log_send = log_send.clone();
+
+        futures.push(handle_connection(stream, uptime, log_send));
+      },
+
+      res = futures.next() => {
+        if let Some(Err(e)) = res {
+          eprintln!("{}", e);
+        }
+      },
+    }
+  } 
 }
 
 async fn handle_connection(
@@ -115,6 +134,6 @@ impl Prepend for Response {
 }
 
 pub fn make_tube<T>() -> Tubes<T> {
-  let (r, s) = mpsc::channel();
-  (Arc::new(Mutex::new(r)), Arc::new(Mutex::new(s)))
+  let (s, r) = tokio::sync::mpsc::unbounded_channel();
+  (Arc::new(Mutex::new(s)), r)
 }

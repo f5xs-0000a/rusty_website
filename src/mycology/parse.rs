@@ -3,15 +3,28 @@ use {
     consts,
     log::Err,
     mycology::generate::{CatInfo, GenInfo, SpecInfo},
-    types::{Categories, Condition, Genera, Species, YamlChunks},
+    types::{Categories, Genera, Species, YamlChunks},
   },
   std::fs,
 };
 
+#[derive(Copy, Clone)]
 enum Layer {
   Category,
   Genus,
   Species,
+}
+
+impl Layer {
+  fn condition(&self, s: &str) -> bool {
+    use Layer::*;
+    match self {
+      Category => !s.starts_with("  ") && s.ends_with(':'),
+      // uhh, always false?
+      Genus => s.starts_with("  ") && !s.starts_with("   ") && s.ends_with(':'),
+      Species => s.starts_with("    ") && s.ends_with(':'),
+    }
+  }
 }
 
 pub enum Parse {
@@ -38,7 +51,7 @@ impl Construct for YamlChunks {
 
         let genera = match parse_all {
           Parse::JustCats => vec![],
-          Parse::All => split_by(lines, condition(Layer::Genus)).struct_genus(),
+          Parse::All => split_by(lines, Layer::Genus).struct_genus(),
         };
 
         CatInfo {
@@ -55,7 +68,7 @@ impl Construct for YamlChunks {
       .into_iter()
       .map(|lines| {
         let title = lines.first().sanitise();
-        let species = split_by(lines, condition(Layer::Species)).struct_species();
+        let species = split_by(lines, Layer::Species).struct_species();
         GenInfo { title, species }
       })
       .collect()
@@ -95,7 +108,7 @@ pub fn yaml(parse_all: Parse) -> Categories {
   match fs::read_to_string(consts::YAML_FILE) {
     Ok(v) => {
       let yaml = v.split('\n').map(str::to_string).collect();
-      let categories = split_by(yaml, condition(Layer::Category));
+      let categories = split_by(yaml, Layer::Category);
       categories.struct_category(parse_all)
     }
     Err(e) => {
@@ -105,19 +118,11 @@ pub fn yaml(parse_all: Parse) -> Categories {
   }
 }
 
-fn condition(layer: Layer) -> Condition {
-  Box::new(match layer {
-    Layer::Category => |(_, s)| !s.starts_with("  ") && s.ends_with(':'),
-    Layer::Genus => |(_, s)| s.starts_with("  ") && !s.starts_with("   ") && s.ends_with(':'),
-    Layer::Species => |(_, s)| s.starts_with("    ") && s.ends_with(':'),
-  })
-}
-
-fn split_by(lines: Vec<String>, condition: Condition) -> YamlChunks {
+fn split_by(lines: Vec<String>, layer: Layer) -> YamlChunks {
   let divisions: Vec<usize> = lines
     .iter()
     .enumerate()
-    .filter(condition)
+    .filter(|(_, s)| layer.condition(s))
     .map(|(i, _)| i)
     .collect();
   let m_divs = &divisions;

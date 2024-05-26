@@ -31,13 +31,11 @@ pub type Request = Vec<String>;
 pub type Result<T> = result::Result<T, Box<dyn error::Error>>;
 
 pub mod tubes {
-  use std::sync::{
-    mpsc::{Receiver, Sender},
-    Arc, Mutex,
-  };
-  pub type Tubes<T> = (Arc<Mutex<Sender<T>>>, Arc<Mutex<Receiver<T>>>);
+  use std::sync::{Arc, Mutex};
+  use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver};
+  pub type Tubes<T> = (Arc<Mutex<UnboundedSender<T>>>, UnboundedReceiver<T>);
 
-  pub type RecvTube<T> = Arc<Mutex<Receiver<T>>>;
+  pub type RecvTube<T> = Arc<Mutex<UnboundedReceiver<T>>>;
 
-  pub type SendTube<T> = Arc<Mutex<Sender<T>>>;
+  pub type SendTube<T> = Arc<Mutex<UnboundedSender<T>>>;
 }

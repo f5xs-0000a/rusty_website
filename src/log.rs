@@ -7,9 +7,11 @@ use {
   std::{
     fmt, fs,
     io::Write,
-    sync::{mpsc::Receiver, Arc, Mutex}, time,
+    time,
+    sync::Mutex,
   },
 };
+use tokio::sync::mpsc::UnboundedReceiver;
 
 pub struct Log {
   pub path: Option<String>,
@@ -32,18 +34,38 @@ where
   T: fmt::Debug,
 {
   fn log_err(self) {
-    let err = format!("ERROR - {:?}\n", self);
-    eprint!("{err}");
-    match fs::OpenOptions::new()
-      .append(true)
-      .create(true)
-      .open(consts::LOG_FILE)
-    {
-      Err(e) => eprintln!("{} {} - cannot open log file", e, consts::LOG_FILE),
-      Ok(mut v) => {
-        if let Err(e) = v.write_all(err.as_bytes()) {
-          eprintln!("{} {} - error writing to log file", e, consts::LOG_FILE)
-        }
+    // TODO: this should be async, and should pass the log_file into here
+    // use OnceLock to initialize only once, then place globally
+    // use Mutex for interior mutability
+    // use Option because we might fail doing this
+    static OPENLOGFILE: std::sync::OnceLock<Option<Mutex<fs::File>>> = std::sync::OnceLock::new();
+
+    // this initializes only once, gets
+    let log_file = OPENLOGFILE.get_or_init(|| {
+      match fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(consts::LOG_FILE)
+      {
+        // unfortunately, this method tries only once
+        Err(e) => {
+          eprintln!("{} {} - cannot open log file", e, consts::LOG_FILE);
+          None
+        },
+
+        Ok(v) => Some(Mutex::new(v)),
+      }
+    });
+
+    if let Some(f) = log_file.as_ref() {
+      if let Err(e) = {
+        let mut lock = f.lock().unwrap();
+        
+        // don't allocate a new string using format! when we can write directly
+        // to disk instead
+        write!(&mut *lock, "ERROR - {:?}\n", self)
+      } {
+        eprintln!("{} {} - error writing to log file", e, consts::LOG_FILE);
       }
     }
   }
@@ -129,18 +151,10 @@ impl ToWdhms for u64 {
   }
 }
 
-pub fn logger(receiver: Arc<Mutex<Receiver<Log>>>) {
-  trait Default: Sized {
-    fn default() -> Self;
-  }
+pub async fn logger(mut receiver: UnboundedReceiver<Log>) {
+  let none = || "None".to_owned();
 
-  impl Default for String {
-    fn default() -> Self {
-      "None".to_string()
-    }
-  }
-
-  let file = fs::OpenOptions::new()
+  let mut file = fs::OpenOptions::new()
     .append(true)
     .create(true)
     .open(consts::LOG_FILE);
@@ -150,12 +164,14 @@ pub fn logger(receiver: Arc<Mutex<Receiver<Log>>>) {
   let mut unique_conn = 0;
 
   loop {
-    let message = receiver.lock().unwrap().recv();
+    let message = match receiver.recv().await {
+      None => return,
+      Some(m) => m,
+    };
 
-    match (message, file.as_ref()) {
-      (Err(_), _) => break, // break the loop and end the thread when the pipe dies
+    match (message, file.as_mut()) {
       (_, Err(e)) => eprintln!("{} {} - cannot open log file", e, consts::LOG_FILE),
-      (Ok(log), Ok(mut file)) => {
+      (log, Ok(file)) => {
         let Log {
           path,
           host,
@@ -169,12 +185,12 @@ pub fn logger(receiver: Arc<Mutex<Receiver<Log>>>) {
         } = log;
 
         let ip_str = ip.to_string();
-        let path = path.unwrap_or_default();
+        let path = path.unwrap_or_else(none);
         let timestamp = cxn_time.to_string();
         let uptime = start_time.to_uptime();
         let host = host.to_string();
-        let referer = referer.unwrap_or_default();
-        let user_agent = user_agent.unwrap_or_default();
+        let referer = referer.unwrap_or_else(none);
+        let user_agent = user_agent.unwrap_or_else(none);
         let turnaround = cxn_time.to_elapsed();
 
         let mini_log = |total_conn: i32| {
